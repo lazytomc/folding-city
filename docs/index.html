@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Folding City — Hong Kong</title>
+<style>
+/* ————————————————————————————————————————————————
+   Folding City : Hong Kong — browser port of the iOS app.
+   Layout, colours, typography and wording mirror ContentView.swift.
+   ———————————————————————————————————————————————— */
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body { height: 100%; background: #000; overflow: hidden; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif;
+  color: #fff;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* —— four-colour zone field (shared by full-screen background and map) —— */
+.zone-field { position: absolute; inset: 0; display: grid; grid-template: 1fr 1fr / 1fr 1fr; }
+.zone-cell  { position: relative; overflow: hidden; }   /* overflow:hidden masks the glow to its cell */
+.zone-glow  {
+  position: absolute; border-radius: 50%; pointer-events: none;
+  mix-blend-mode: screen;                                 /* fallback for old Firefox */
+  will-change: transform, opacity;
+}
+@supports (mix-blend-mode: plus-lighter) {
+  .zone-glow { mix-blend-mode: plus-lighter; }            /* matches SwiftUI .plusLighter */
+}
+/* slow hue drift, 0→360° over 70 s, like .hueRotation + repeatForever */
+.hue-anim { animation: hueDrift 70s linear infinite; }
+@keyframes hueDrift { from { filter: hue-rotate(0deg); } to { filter: hue-rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .hue-anim { animation: none; }
+  #dot { animation: none; }
+}
+
+#bgField { position: fixed; inset: 0; z-index: 0; }
+
+/* —— main column (mirrors the SwiftUI VStack, spacing 24) ——
+   flex:none on every row stops iOS Safari from squashing the map when the
+   viewport is short; the ::before/::after spacers centre the column when
+   there is room and let it scroll when there genuinely is not. */
+main {
+  position: relative; z-index: 1;
+  height: 100vh; height: 100dvh;
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+  gap: 22px; padding: 16px;
+  overflow-y: auto;
+}
+main::before, main::after { content: ""; flex: 1 1 0; min-height: 0; }
+main > * { flex: none; }
+@media (max-height: 740px) { main { gap: 12px; } }
+
+/* title block */
+header { text-align: center; }
+header h1 {
+  font-size: 28px; font-weight: 200; letter-spacing: 8px; margin-right: -8px;
+  text-shadow: 0 0 4px rgba(0,0,0,.5), 0 1px 4px rgba(0,0,0,.5);
+}
+header h2 {
+  font-size: 12px; font-weight: 300; letter-spacing: 8px; margin-right: -8px; margin-top: 4px;
+  text-shadow: 0 0 3px rgba(0,0,0,.5);
+}
+
+/* —— segmented mode control (liquid-glass approximation) —— */
+#modeControl {
+  position: relative; width: 240px; height: 44px; border-radius: 22px;
+  filter: drop-shadow(0 4px 8px rgba(0,0,0,.15));
+}
+#modeBase {
+  position: absolute; inset: 0; border-radius: 22px;
+  -webkit-backdrop-filter: blur(14px) saturate(1.4); backdrop-filter: blur(14px) saturate(1.4);
+  background: rgba(0,0,0,.28);
+  border: 1px solid rgba(255,255,255,.15);
+}
+#modeIndicator {
+  position: absolute; top: 4px; left: 0; width: 112px; height: 36px; border-radius: 18px;
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  background: rgba(255,255,255,.28);
+  border: 1px solid rgba(255,255,255,.5);
+  transform: translateX(4px);
+  transition: transform .35s cubic-bezier(.25,1.25,.4,1);   /* spring(0.35, 0.85) feel */
+}
+#modeLabels { position: absolute; inset: 0; display: flex; }
+.mode-label {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 600; color: rgba(255,255,255,.7);
+  text-shadow: 0 1px 3px rgba(0,0,0,.4); cursor: pointer;
+}
+.mode-label.selected { font-weight: 700; color: #fff; }
+.mode-label.disabled { opacity: .35; cursor: default; }
+
+/* status line */
+#statusLine {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: rgba(255,255,255,.85);
+  text-shadow: 0 1px 3px rgba(0,0,0,.45);
+  min-height: 15px;
+}
+#statusDot { width: 10px; height: 10px; border-radius: 50%; background: #ff453a; display: none; }
+
+/* hold-to-walk (compass mode only — the one added control) */
+#holdWalk {
+  display: none; padding: 8px 22px; border-radius: 17px;
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.35);
+  color: #fff; font-size: 13px; font-weight: 600;
+  text-shadow: 0 1px 3px rgba(0,0,0,.4); cursor: pointer; touch-action: none;
+}
+#holdWalk.active { background: rgba(255,255,255,.38); }
+
+/* —— map —— */
+#map {
+  position: relative;
+  /* bounded by height too, so short phone viewports shrink the square map
+     instead of letting the column overflow (dvh tracks Safari's URL bar) */
+  width: min(280px, 74vw, 40dvh); height: min(280px, 74vw, 40dvh);
+  touch-action: none; cursor: crosshair;
+}
+.zone-label {
+  position: absolute; padding: 10px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10px; font-weight: 700; letter-spacing: 1px; color: rgba(255,255,255,.7);
+  text-shadow: 0 1px 2px rgba(0,0,0,.45); pointer-events: none;
+}
+#mapSvg { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+.grid-blur { filter: blur(5px); }
+#dot {
+  position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
+  background: rgba(255,255,255,.55); pointer-events: none;
+  animation: breathe 1.6s ease-in-out infinite alternate;
+}
+@keyframes breathe {
+  from { transform: scale(.85); opacity: .45; box-shadow: 0 0 1.5px rgba(255,255,255,.25); }
+  to   { transform: scale(1.2); opacity: .65; box-shadow: 0 0 4px  rgba(255,255,255,.25); }
+}
+
+/* readouts */
+#readouts { display: flex; gap: 24px; text-shadow: 0 1px 3px rgba(0,0,0,.45); }
+.readout { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.readout .k { font-size: 11px; color: rgba(255,255,255,.75); }
+.readout .v { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 20px; width: 70px; text-align: center; }
+#headVal { color: #32ade6; }
+#distVal { color: #ff9f0a; }
+
+/* spatial focus slider */
+#focusBlock { display: flex; flex-direction: column; align-items: center; gap: 10px; width: min(320px, 80vw); }
+#focusLabel { font-size: 15px; text-shadow: 0 1px 3px rgba(0,0,0,.45); }
+#slider { position: relative; width: 100%; height: 26px; touch-action: none; cursor: pointer; }
+#sliderTrack, #sliderFill {
+  position: absolute; top: 10px; height: 6px; border-radius: 3px;
+}
+#sliderTrack { left: 0; right: 0; background: rgba(255,255,255,.25); }
+#sliderFill  { left: 0; background: #32ade6; }
+#sliderThumb {
+  position: absolute; top: 0; width: 26px; height: 26px; margin-left: -13px; border-radius: 50%;
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  background: rgba(255,255,255,.3); border: 1px solid rgba(255,255,255,.55);
+  box-shadow: 0 1px 3px rgba(0,0,0,.3);
+}
+
+/* transport row */
+#transport { display: flex; align-items: center; gap: 32px; }
+#playBtn, #calBtn { background: none; border: none; cursor: pointer; padding: 0; color: inherit; }
+#playBtn svg { display: block; filter: drop-shadow(0 0 5px rgba(0,0,0,.4)); }
+#playBtn:disabled { opacity: .5; cursor: default; }
+#calBtn { display: flex; flex-direction: column; align-items: center; gap: 4px; color: #ff9f0a;
+          filter: drop-shadow(0 0 4px rgba(0,0,0,.4)); font-size: 12px; }
+#calBtn.calibrated { color: #32ade6; }
+#playHint { position: absolute; font-size: 10px; color: rgba(255,255,255,.7); margin-top: 84px; }
+
+/* —— loading overlay —— */
+#loading {
+  position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,.35); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+}
+#loadCard {
+  width: min(320px, 82vw); padding: 28px 24px; border-radius: 24px; text-align: center;
+  -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+  background: rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.18);
+}
+#loadCard h3 { font-size: 15px; font-weight: 200; letter-spacing: 6px; margin-right: -6px; }
+#loadPct { font-family: ui-monospace, Menlo, monospace; font-size: 26px; margin: 14px 0 10px; }
+#loadBar { height: 4px; border-radius: 2px; background: rgba(255,255,255,.18); overflow: hidden; }
+#loadFill { height: 100%; width: 0%; border-radius: 2px; background: #fff; transition: width .2s linear; }
+#loadNote { margin-top: 12px; font-size: 11px; color: rgba(255,255,255,.6); }
+#loading.hidden { display: none; }
+
+/* —— error bar —— */
+#errorBar {
+  position: fixed; left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom));
+  z-index: 20; display: none; padding: 12px 16px; border-radius: 14px;
+  background: rgba(120,20,20,.92); border: 1px solid rgba(255,255,255,.25);
+  font-size: 13px; line-height: 1.45;
+}
+</style>
+</head>
+<body>
+
+<div id="bgField" class="zone-field hue-anim"></div>
+
+<main>
+  <header>
+    <h1>Folding City</h1>
+    <h2>Hong Kong</h2>
+  </header>
+
+  <div id="modeControl">
+    <div id="modeBase"></div>
+    <div id="modeIndicator"></div>
+    <div id="modeLabels">
+      <div class="mode-label" data-mode="compass">Compass</div>
+      <div class="mode-label selected" data-mode="touch">Touch</div>
+    </div>
+  </div>
+
+  <div id="statusLine"><span id="statusDot"></span><span id="statusText">Drag on the map to move and turn</span></div>
+
+  <button id="holdWalk">Hold to Walk</button>
+
+  <div id="map">
+    <div id="mapField" class="zone-field hue-anim"></div>
+    <svg id="mapSvg"></svg>
+    <div id="dot"></div>
+  </div>
+
+  <div id="readouts">
+    <div class="readout"><span class="k">HEAD</span><span class="v" id="headVal">0°</span></div>
+    <div class="readout"><span class="k">DISTANCE</span><span class="v" id="distVal">0.0m</span></div>
+  </div>
+
+  <div id="focusBlock">
+    <div id="focusLabel">Spatial Focus: 2.0</div>
+    <div id="slider">
+      <div id="sliderTrack"></div><div id="sliderFill"></div><div id="sliderThumb"></div>
+    </div>
+  </div>
+
+  <div id="transport">
+    <button id="playBtn" aria-label="Play" disabled></button>
+    <button id="calBtn">
+      <svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor"
+           stroke-width="2.4" stroke-linecap="round">
+        <path d="M 26.4 12.7 A 11 11 0 0 0 7.9 8.9"/><path d="M 8.5 4.5 L 7.6 9.2 L 12.3 10"/>
+        <path d="M 5.6 19.3 A 11 11 0 0 0 24.1 23.1"/><path d="M 23.5 27.5 L 24.4 22.8 L 19.7 22"/>
+      </svg>
+      <span>Calibrate</span>
+    </button>
+  </div>
+</main>
+
+<div id="loading">
+  <div id="loadCard">
+    <h3>FOLDING CITY</h3>
+    <div id="loadPct">0%</div>
+    <div id="loadBar"><div id="loadFill"></div></div>
+    <div id="loadNote">Loading four spatial audio tracks…</div>
+  </div>
+</div>
+
+<div id="errorBar"></div>
+
+<script>
+'use strict';
+/* ═══════════════════════════════════════════════════════════════
+   CONFIG — everything you might tune lives here.
+   Constants mirror SpatialAudioEngine.swift one-for-one.
+   ═══════════════════════════════════════════════════════════════ */
+const CONFIG = {
+  audio: {                                     // quadrant → file (kUpper/Lower…File in Swift)
+    upperLeft : 'audio/Track1_transport_V1.m4a',
+    upperRight: 'audio/Track2_commercial_V1.m4a',
+    lowerLeft : 'audio/Track3_praying_V1.m4a',
+    lowerRight: 'audio/Track4_bay_V1.m4a',
+  },
+  circleRadius : 3.0,     // kCircleRadius — map edge (m)
+  sourceRadius : 2.1,     // kSourceRadius — source distance from centre (m)
+  refDistance  : 1.5,     // kReferenceDistance — full-volume radius (m)
+  maxDistance  : 4.0,     // kMaxDistance — attenuation stops past this (m)
+  focusPower   : 2.0,     // rolloffFactor default (the Spatial Focus slider)
+  focusRange   : [0.5, 6],
+  walkSpeed    : 1.0,     // m/s while Hold-to-Walk is pressed (compass mode)
+  fadeIn       : 2.0,     // s — mirrors fadeMixer(to: 1, duration: 2.0)
+  fadeOut      : 1.5,     // s — mirrors fadeMixer(to: 0, duration: 1.5)
+  smoothing    : 0.05,    // setTargetAtTime time constant for listener moves (s)
+};
+
+/* Quadrant table — angles, cells, labels and gradients from ContentView/SpatialAudioEngine.
+   Gradient colours are Swift's exact HSB tuples, converted at runtime. */
+const CENTER_BLEND = [0.88 * 255, 0.85 * 255, 0.93 * 255];   // MapZone.centerBlend (RGB)
+const ZONES = [
+  { key:'upperLeft',  label:'TRANSPORT', angle:315, cell:[0,0], dir:'to bottom right',
+    hsb:[[0.63,0.78,0.55],[0.53,0.68,0.88]], corner:{top:0,left:0} },
+  { key:'upperRight', label:'MARKET',    angle: 45, cell:[0,1], dir:'to bottom left',
+    hsb:[[0.99,0.72,0.80],[0.10,0.78,0.92]], corner:{top:0,right:0} },
+  { key:'lowerLeft',  label:'TEMPLE',    angle:225, cell:[1,0], dir:'to top right',
+    hsb:[[0.79,0.58,0.55],[0.90,0.52,0.85]], corner:{bottom:0,left:0} },
+  { key:'lowerRight', label:'BAY',       angle:135, cell:[1,1], dir:'to top left',
+    hsb:[[0.45,0.62,0.45],[0.27,0.60,0.80]], corner:{bottom:0,right:0} },
+];
+
+/* worldPosition(angleDeg:radius:) — right-handed frame: +x right, −z forward */
+function worldPosition(angleDeg, radius) {
+  const rad = angleDeg * Math.PI / 180;
+  return { x: radius * Math.sin(rad), z: -radius * Math.cos(rad) };
+}
+
+/* approximateGain(distance:) — display-only curve, identical to the Swift version
+   (the audible mix is computed by the PannerNodes, as it is by AVAudio3D in the app) */
+function approximateGain(distance, focus) {
+  if (distance >= CONFIG.maxDistance) return 0;
+  const d = Math.max(distance, CONFIG.refDistance);
+  const g = Math.pow(d / CONFIG.refDistance, -focus);
+  return Math.min(Math.max(g, 0), 1);
+}
+
+function hsb2rgb(h, s, v) {                    // SwiftUI Color(hue:saturation:brightness:)
+  const i = Math.floor(h * 6), f = h * 6 - i;
+  const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+  const [r, g, b] = [[v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]][i % 6];
+  return [r * 255, g * 255, b * 255];
+}
+const rgbCss = c => `rgb(${c.map(x => Math.round(x)).join(',')})`;
+
+/* ═══════════════════════════════════════════════════════════════
+   STATE — mirrors the @Published block of SpatialAudioEngine
+   ═══════════════════════════════════════════════════════════════ */
+const state = {
+  mode: 'touch',            // compass ≙ the app's headphone mode, see README
+  playing: false,
+  posX: 0, posY: 0,         // metres, +x right / +y forward (map "up")
+  yawDeg: 0,                // listening & travel direction (one sensor in the browser)
+  focus: CONFIG.focusPower,
+  calibrated: false,
+  compassAvailable: (typeof DeviceOrientationEvent !== 'undefined'),
+  compassActive: false,     // a usable heading event has arrived
+  lastHeading: null,        // absolute compass heading (° clockwise from north)
+  refHeading: 0,
+  walking: false,
+  gains: { upperLeft:0, upperRight:0, lowerLeft:0, lowerRight:0 },
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   DOM — build the two zone fields, the map SVG, wire controls
+   ═══════════════════════════════════════════════════════════════ */
+const $ = id => document.getElementById(id);
+const glows = { bg:{}, map:{} };
+
+function buildZoneField(container, glowStore, withLabels) {
+  ZONES.slice().sort((a, b) => (a.cell[0] - b.cell[0]) || (a.cell[1] - b.cell[1]))
+    .forEach(z => {
+      const cell = document.createElement('div');
+      cell.className = 'zone-cell';
+      const stops = [rgbCss(hsb2rgb(...z.hsb[0])), rgbCss(hsb2rgb(...z.hsb[1])), rgbCss(CENTER_BLEND)];
+      cell.style.background = `linear-gradient(${z.dir}, ${stops[0]} 0%, ${stops[1]} 50%, ${stops[2]} 100%)`;
+      const glow = document.createElement('div');
+      glow.className = 'zone-glow';
+      cell.appendChild(glow);
+      glowStore[z.key] = { el: glow, cell: z.cell };
+      if (withLabels) {
+        const lb = document.createElement('div');
+        lb.className = 'zone-label';
+        lb.textContent = z.label;
+        for (const k in z.corner) lb.style[k] = z.corner[k] + 'px';
+        cell.appendChild(lb);
+      }
+      container.appendChild(cell);
+    });
+}
+buildZoneField($('bgField'), glows.bg, false);
+buildZoneField($('mapField'), glows.map, true);
+
+/* map overlay SVG: grid, frame, origin ring, hearing cone (yaw), travel arrow (walk) */
+const SVG = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(SVG, tag);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  return el;
+}
+let mapSize = 280;
+const mapSvg = $('mapSvg');
+const coneGroup = svgEl('g', {});
+const arrowGroup = svgEl('g', {});
+
+function buildMapSvg() {
+  mapSvg.innerHTML = '';
+  const s = mapSize, h = s / 2;
+  mapSvg.setAttribute('viewBox', `0 0 ${s} ${s}`);
+
+  const defs = svgEl('defs', {});
+  const grad = svgEl('radialGradient', { id:'coneGrad', gradientUnits:'userSpaceOnUse',
+                                         cx:0, cy:0, r: s * 0.32 });
+  grad.appendChild(svgEl('stop', { offset:'0%',   'stop-color':'rgba(255,255,255,0.4)' }));
+  grad.appendChild(svgEl('stop', { offset:'100%', 'stop-color':'rgba(255,255,255,0)' }));
+  defs.appendChild(grad);
+  mapSvg.appendChild(defs);
+
+  // grid cross + frame, softened like the SwiftUI .blur(radius: 5)
+  const grid = svgEl('g', { class:'grid-blur', stroke:'rgba(255,255,255,0.4)', 'stroke-width':3, fill:'none' });
+  grid.appendChild(svgEl('line', { x1:h, y1:0, x2:h, y2:s }));
+  grid.appendChild(svgEl('line', { x1:0, y1:h, x2:s, y2:h }));
+  grid.appendChild(svgEl('rect', { x:1.5, y:1.5, width:s-3, height:s-3 }));
+  mapSvg.appendChild(grid);
+
+  // calibration origin
+  mapSvg.appendChild(svgEl('circle', { cx:h, cy:h, r:4, fill:'none',
+                                       stroke:'rgba(255,255,255,0.35)', 'stroke-width':1 }));
+
+  // hearing cone (half-angle 26°, radius 0.32·size) — rotates with yawDeg
+  coneGroup.innerHTML = '';
+  const r = s * 0.32, a = 26 * Math.PI / 180;
+  const x = r * Math.sin(a), y = -r * Math.cos(a);
+  coneGroup.appendChild(svgEl('path', {
+    d: `M 0 0 L ${-x} ${y} A ${r} ${r} 0 0 1 ${x} ${y} Z`, fill: 'url(#coneGrad)',
+  }));
+  mapSvg.appendChild(coneGroup);
+
+  // travel arrow (the app's Arrow shape: 8×22, offset −11) — rotates with walk bearing
+  arrowGroup.innerHTML = '';
+  arrowGroup.appendChild(svgEl('path', {
+    d: 'M 0 -22 L 4 -13.2 L 0 -16.5 L -4 -13.2 Z', fill: 'rgba(255,255,255,0.85)',
+  }));
+  mapSvg.appendChild(arrowGroup);
+}
+
+/* world ↔ screen (MapView.worldToScreen / screenToWorld, inset scaled from 280pt) */
+function inset() { return 10 * (mapSize / 280); }
+function worldToScreen(x, y) {
+  const nX = Math.max(-1, Math.min(1, x / CONFIG.circleRadius));
+  const nY = Math.max(-1, Math.min(1, y / CONFIG.circleRadius));
+  return { x: mapSize / 2 + nX * (mapSize / 2 - inset()),
+           y: mapSize / 2 - nY * (mapSize / 2 - inset()) };
+}
+function screenToWorld(px, py) {
+  const half = mapSize / 2;
+  const nX = Math.max(-1, Math.min(1, (px - half) / (half - inset())));
+  const nY = Math.max(-1, Math.min(1, (half - py) / (half - inset())));
+  return { x: nX * CONFIG.circleRadius, y: nY * CONFIG.circleRadius };
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   AUDIO ENGINE — Web Audio port of SpatialAudioEngine's graph:
+   4 × (AudioBufferSourceNode → PannerNode → GainNode) → master GainNode → destination.
+   All four sources start at one shared context time, so the tracks
+   stay sample-locked — the synchronisation is the piece.
+   ═══════════════════════════════════════════════════════════════ */
+const engine = {
+  ctx: null, master: null,
+  tracks: {},          // key → { panner, gain, source, buffer }
+  rawFiles: {},        // key → ArrayBuffer (fetched up-front, decoded on first Play)
+  decoded: false,
+};
+
+function makeContext() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  engine.ctx = new AC();
+  engine.master = engine.ctx.createGain();
+  engine.master.gain.value = 0;
+  engine.master.connect(engine.ctx.destination);
+
+  for (const z of ZONES) {
+    const p = engine.ctx.createPanner();
+    try { p.panningModel = 'HRTF'; } catch (e) { /* keep default */ }
+    if (p.panningModel !== 'HRTF') p.panningModel = 'equalpower';   // graceful fallback
+    p.distanceModel = 'exponential';               // .exponential in AVAudio3D
+    p.refDistance   = CONFIG.refDistance;
+    p.maxDistance   = CONFIG.maxDistance;
+    p.rolloffFactor = state.focus;
+    const pos = worldPosition(z.angle, CONFIG.sourceRadius);
+    setNodePosition(p, pos.x, 0, pos.z);           // sources are fixed; the listener moves
+    const g = engine.ctx.createGain();
+    g.gain.value = 1;
+    p.connect(g).connect(engine.master);
+    engine.tracks[z.key] = { panner: p, gain: g, source: null, buffer: null };
+  }
+  engine.ctx.onstatechange = () => { if (state.playing) tryResume(); };
+}
+
+/* modern AudioParam path with the deprecated setter as the Safari fallback */
+function setNodePosition(node, x, y, z) {
+  if (node.positionX) {
+    node.positionX.value = x; node.positionY.value = y; node.positionZ.value = z;
+  } else if (node.setPosition) {
+    node.setPosition(x, y, z);
+  }
+}
+function moveListener(x, y, z, fx, fy, fz) {
+  const L = engine.ctx.listener, t = engine.ctx.currentTime, tc = CONFIG.smoothing;
+  if (L.positionX) {
+    L.positionX.setTargetAtTime(x, t, tc);
+    L.positionY.setTargetAtTime(y, t, tc);
+    L.positionZ.setTargetAtTime(z, t, tc);
+    L.forwardX.setTargetAtTime(fx, t, tc);
+    L.forwardY.setTargetAtTime(fy, t, tc);
+    L.forwardZ.setTargetAtTime(fz, t, tc);
+    L.upX.setTargetAtTime(0, t, tc); L.upY.setTargetAtTime(1, t, tc); L.upZ.setTargetAtTime(0, t, tc);
+  } else {
+    L.setPosition(x, y, z);                       // legacy Safari — no per-param smoothing
+    L.setOrientation(fx, fy, fz, 0, 1, 0);
+  }
+}
+
+/* stereo → mono, mirroring monoBuffer(from:) — a stereo source through a
+   PannerNode will not localise cleanly, same reason as in the app */
+function toMono(buf) {
+  if (buf.numberOfChannels === 1) return buf;
+  const out = engine.ctx.createBuffer(1, buf.length, buf.sampleRate);
+  const o = out.getChannelData(0), n = buf.numberOfChannels;
+  for (let c = 0; c < n; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < d.length; i++) o[i] += d[i] / n;
+  }
+  return out;
+}
+
+async function decodeAll(onProgress) {
+  let done = 0;
+  for (const z of ZONES) {                        // sequential keeps peak memory down
+    const t = engine.tracks[z.key];
+    if (!t.buffer) {
+      const bytes = engine.rawFiles[z.key];
+      let decoded;
+      try {
+        decoded = await engine.ctx.decodeAudioData(bytes.slice(0));
+      } catch (e) {
+        throw new Error(`Could not decode ${CONFIG.audio[z.key]} — the file may be corrupt or an unsupported codec.`);
+      }
+      t.buffer = toMono(decoded);
+      delete engine.rawFiles[z.key];              // release the compressed copy
+    }
+    onProgress(++done, ZONES.length);
+  }
+  engine.decoded = true;
+}
+
+function startPlayback() {
+  const t0 = engine.ctx.currentTime + 0.15;       // one shared start time = sample-locked
+  for (const z of ZONES) {
+    const t = engine.tracks[z.key];
+    const src = engine.ctx.createBufferSource();
+    src.buffer = t.buffer;
+    src.loop = true;                              // .loops in scheduleBuffer
+    src.connect(t.panner);
+    src.start(t0);
+    t.source = src;
+  }
+  const g = engine.master.gain;                   // fade-in, as fadeMixer(to:1, 2.0s)
+  g.cancelScheduledValues(t0); g.setValueAtTime(0, t0);
+  g.linearRampToValueAtTime(1, t0 + CONFIG.fadeIn);
+  state.playing = true;
+}
+
+function stopPlayback() {
+  const t = engine.ctx.currentTime;
+  const g = engine.master.gain;                   // fade-out, as fadeMixer(to:0, 1.5s)
+  g.cancelScheduledValues(t); g.setValueAtTime(g.value, t);
+  g.linearRampToValueAtTime(0, t + CONFIG.fadeOut);
+  const sources = ZONES.map(z => engine.tracks[z.key].source).filter(Boolean);
+  setTimeout(() => sources.forEach(s => { try { s.stop(); } catch (e) {} }), CONFIG.fadeOut * 1000 + 100);
+  for (const z of ZONES) engine.tracks[z.key].source = null;
+  state.playing = false;
+}
+
+function tryResume() {
+  if (engine.ctx && state.playing && engine.ctx.state !== 'running') {
+    engine.ctx.resume().catch(() => {});
+  }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tryResume(); });
+window.addEventListener('pointerdown', tryResume, true);
+
+/* ═══════════════════════════════════════════════════════════════
+   LOADING — fetch the four tracks with a real byte-level percentage
+   ═══════════════════════════════════════════════════════════════ */
+const loaded = { bytes: {}, totals: {} };
+function updateLoadUI() {
+  const got = Object.values(loaded.bytes).reduce((a, b) => a + b, 0);
+  const tot = Object.values(loaded.totals).reduce((a, b) => a + b, 0);
+  const pct = tot ? Math.floor(got / tot * 100) : 0;
+  $('loadPct').textContent = pct + '%';
+  $('loadFill').style.width = pct + '%';
+}
+async function fetchTrack(key) {
+  const url = CONFIG.audio[key];
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Could not load ${url} — HTTP ${res.status}.`);
+  const total = parseInt(res.headers.get('Content-Length') || '0', 10);
+  loaded.totals[key] = total || 8 * 1024 * 1024;  // sensible guess if the server hides length
+  const reader = res.body.getReader();
+  const chunks = []; let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value); got += value.length;
+    loaded.bytes[key] = got;
+    updateLoadUI();
+  }
+  loaded.totals[key] = got;
+  const all = new Uint8Array(got); let off = 0;
+  for (const c of chunks) { all.set(c, off); off += c.length; }
+  engine.rawFiles[key] = all.buffer;
+}
+async function loadAll() {
+  try {
+    await Promise.all(ZONES.map(z => fetchTrack(z.key)));
+    $('loading').classList.add('hidden');
+    $('playBtn').disabled = false;
+  } catch (e) {
+    $('loading').classList.add('hidden');
+    showError(e.message + ' Check that the audio/ folder sits next to index.html and that the page is served over HTTP, not opened as a file.');
+  }
+}
+function showError(msg) {
+  const bar = $('errorBar');
+  bar.textContent = msg;
+  bar.style.display = 'block';
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CONTROLS
+   ═══════════════════════════════════════════════════════════════ */
+const playSvg = playing => playing
+  ? `<svg width="72" height="72" viewBox="0 0 72 72"><path fill="#ff453a" fill-rule="evenodd"
+       d="M36 4a32 32 0 1 1 0 64 32 32 0 0 1 0-64Zm-9 21a2 2 0 0 0-2 2v18a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V27a2 2 0 0 0-2-2H27Z"/></svg>`
+  : `<svg width="72" height="72" viewBox="0 0 72 72"><path fill="#30d158" fill-rule="evenodd"
+       d="M36 4a32 32 0 1 1 0 64 32 32 0 0 1 0-64Zm-7 18.5v27a1.5 1.5 0 0 0 2.3 1.3l21.8-13.5a1.5 1.5 0 0 0 0-2.6L31.3 21.2a1.5 1.5 0 0 0-2.3 1.3Z"/></svg>`;
+$('playBtn').innerHTML = playSvg(false);
+
+$('playBtn').addEventListener('click', async () => {
+  try {
+    if (!engine.ctx) makeContext();               // context + resume inside the user gesture,
+    await engine.ctx.resume();                    // so autoplay policy never blocks playback
+    if (!engine.decoded) {
+      $('playBtn').disabled = true;
+      await decodeAll((n, total) => { $('statusText').textContent = `Preparing audio ${n}/${total}…`; });
+      $('playBtn').disabled = false;
+      updateStatusLine();
+    }
+    if (state.playing) stopPlayback(); else startPlayback();
+    $('playBtn').innerHTML = playSvg(state.playing);
+  } catch (e) {
+    $('playBtn').disabled = false;
+    showError(e.message);
+  }
+});
+
+/* calibrate — face-forward reset, like SpatialAudioEngine.calibrate() */
+$('calBtn').addEventListener('click', () => {
+  state.posX = 0; state.posY = 0;
+  if (state.mode === 'compass' && state.lastHeading != null) {
+    state.refHeading = state.lastHeading;
+  }
+  if (state.mode === 'touch') state.yawDeg = 0;
+  state.calibrated = true;
+  $('calBtn').classList.add('calibrated');
+});
+
+/* mode switch — compass replaces the app's headphone mode (see README) */
+async function selectMode(mode) {
+  if (mode === state.mode) return;
+  if (mode === 'compass') {
+    if (!state.compassAvailable) return;
+    const ok = await enableCompass();             // permission prompt must live in this tap
+    if (!ok) {
+      showError('Compass access was declined, staying in Touch mode. You can re-enable motion access in the browser settings.');
+      return;
+    }
+  }
+  state.mode = mode;
+  state.calibrated = false;                       // controlMode.didSet { calibrate() }
+  $('calBtn').classList.remove('calibrated');
+  state.posX = 0; state.posY = 0;
+  state.yawDeg = 0;                               // 面向「正前方」，等感應/拖曳再更新
+  if (mode === 'touch') { state.calibrated = true; $('calBtn').classList.add('calibrated'); }
+  else if (state.lastHeading != null) { state.refHeading = state.lastHeading; state.calibrated = true; $('calBtn').classList.add('calibrated'); }
+  document.querySelectorAll('.mode-label').forEach(el =>
+    el.classList.toggle('selected', el.dataset.mode === mode));
+  $('modeIndicator').style.transform =
+    `translateX(${(mode === 'compass' ? 0 : 1) * 120 + 4}px)`;
+  $('holdWalk').style.display = mode === 'compass' ? 'block' : 'none';
+  $('statusDot').style.display = mode === 'compass' ? 'block' : 'none';
+  updateStatusLine();
+}
+document.querySelectorAll('.mode-label').forEach(el => {
+  el.addEventListener('click', () => selectMode(el.dataset.mode));
+});
+if (!state.compassAvailable) {
+  document.querySelector('[data-mode="compass"]').classList.add('disabled');
+}
+$('modeIndicator').style.transform = 'translateX(124px)';   // Touch is the default mode
+
+function updateStatusLine() {
+  if (state.mode === 'compass') {
+    $('statusDot').style.background = state.compassActive ? '#30d158' : '#ff453a';
+    $('statusText').textContent = state.compassActive ? 'Compass Active' : 'No Compass';
+  } else {
+    $('statusText').textContent = 'Drag on the map to move and turn';
+  }
+}
+
+/* compass — webkitCompassHeading on iOS, absolute alpha elsewhere */
+async function enableCompass() {
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try {
+      const r = await DeviceOrientationEvent.requestPermission();
+      if (r !== 'granted') return false;
+    } catch (e) { return false; }
+  }
+  const evName = ('ondeviceorientationabsolute' in window) ? 'deviceorientationabsolute' : 'deviceorientation';
+  window.addEventListener(evName, onOrientation);
+  return true;
+}
+function onOrientation(e) {
+  let heading = null;
+  if (typeof e.webkitCompassHeading === 'number' && !isNaN(e.webkitCompassHeading)) {
+    heading = e.webkitCompassHeading;             // iOS: ° clockwise from north
+  } else if (e.absolute && e.alpha != null) {
+    heading = (360 - e.alpha) % 360;              // alpha is counter-clockwise
+  }
+  if (heading == null) return;
+  state.lastHeading = heading;
+  if (!state.compassActive) {
+    state.compassActive = true;
+    if (!state.calibrated) { state.refHeading = heading; state.calibrated = true; $('calBtn').classList.add('calibrated'); }
+    updateStatusLine();
+  }
+}
+
+/* hold-to-walk — constant-rate travel along the current heading */
+const holdWalk = $('holdWalk');
+['pointerdown'].forEach(ev => holdWalk.addEventListener(ev, e => {
+  e.preventDefault(); state.walking = true; holdWalk.classList.add('active');
+  holdWalk.setPointerCapture(e.pointerId);
+}));
+['pointerup', 'pointercancel'].forEach(ev => holdWalk.addEventListener(ev, () => {
+  state.walking = false; holdWalk.classList.remove('active');
+}));
+
+/* touch mode drag — port of handleDrag/updateTouchPosition */
+const mapEl = $('map');
+let lastDragWorld = null;
+function dragTo(e) {
+  const rect = mapEl.getBoundingClientRect();
+  const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+  if (lastDragWorld) {
+    const dx = w.x - lastDragWorld.x, dy = w.y - lastDragWorld.y;
+    if (Math.hypot(dx, dy) > 0.03) state.yawDeg = Math.atan2(dx, dy) * 180 / Math.PI;
+  }
+  lastDragWorld = w;
+  state.posX = w.x; state.posY = w.y;
+}
+mapEl.addEventListener('pointerdown', e => {
+  if (state.mode !== 'touch') return;
+  mapEl.setPointerCapture(e.pointerId);
+  dragTo(e);
+});
+mapEl.addEventListener('pointermove', e => {
+  if (state.mode !== 'touch' || e.buttons === 0) return;
+  dragTo(e);
+});
+mapEl.addEventListener('pointerup', () => { lastDragWorld = null; });
+
+/* spatial focus slider */
+const slider = $('slider');
+function setFocus(f) {
+  state.focus = Math.min(Math.max(f, CONFIG.focusRange[0]), CONFIG.focusRange[1]);
+  $('focusLabel').textContent = `Spatial Focus: ${state.focus.toFixed(1)}`;
+  const pct = (state.focus - CONFIG.focusRange[0]) / (CONFIG.focusRange[1] - CONFIG.focusRange[0]);
+  $('sliderThumb').style.left = `calc(${(pct * 100).toFixed(2)}% )`;
+  $('sliderFill').style.width = `${(pct * 100).toFixed(2)}%`;
+  if (engine.ctx) for (const z of ZONES) engine.tracks[z.key].panner.rolloffFactor = state.focus;
+}
+function sliderFromEvent(e) {
+  const rect = slider.getBoundingClientRect();
+  const p = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
+  setFocus(CONFIG.focusRange[0] + p * (CONFIG.focusRange[1] - CONFIG.focusRange[0]));
+}
+slider.addEventListener('pointerdown', e => { slider.setPointerCapture(e.pointerId); sliderFromEvent(e); });
+slider.addEventListener('pointermove', e => { if (e.buttons) sliderFromEvent(e); });
+setFocus(CONFIG.focusPower);
+
+/* ═══════════════════════════════════════════════════════════════
+   FRAME LOOP — walk integration, listener update, glows, readouts
+   ═══════════════════════════════════════════════════════════════ */
+let lastT = performance.now();
+function frame(now) {
+  const dt = Math.min((now - lastT) / 1000, 0.1);
+  lastT = now;
+
+  // compass mode: yaw from heading; hold-to-walk advances along it
+  if (state.mode === 'compass' && state.lastHeading != null) {
+    let rel = (state.lastHeading - state.refHeading) % 360;
+    if (rel > 180) rel -= 360; if (rel < -180) rel += 360;
+    state.yawDeg = rel;
+    if (state.walking) {
+      const r = state.yawDeg * Math.PI / 180;
+      state.posX = Math.max(-CONFIG.circleRadius, Math.min(CONFIG.circleRadius,
+                    state.posX + CONFIG.walkSpeed * dt * Math.sin(r)));
+      state.posY = Math.max(-CONFIG.circleRadius, Math.min(CONFIG.circleRadius,
+                    state.posY + CONFIG.walkSpeed * dt * Math.cos(r)));
+    }
+  }
+
+  // audio listener: position (x, 0, −y), forward from yaw — as processMotion does
+  if (engine.ctx) {
+    const r = state.yawDeg * Math.PI / 180;
+    moveListener(state.posX, 0, -state.posY, Math.sin(r), 0, -Math.cos(r));
+  }
+
+  // display gains (approximateGain — the same curve the app shows)
+  for (const z of ZONES) {
+    const p = worldPosition(z.angle, CONFIG.sourceRadius);
+    const d = Math.hypot(state.posX - p.x, -state.posY - p.z);
+    state.gains[z.key] = approximateGain(d, state.focus);
+  }
+
+  render();
+  requestAnimationFrame(frame);
+}
+
+function render() {
+  // dot + cone + arrow
+  const pt = worldToScreen(state.posX, state.posY);
+  const dot = $('dot');
+  dot.style.left = pt.x + 'px'; dot.style.top = pt.y + 'px';
+  coneGroup.setAttribute('transform', `translate(${pt.x} ${pt.y}) rotate(${state.yawDeg})`);
+  arrowGroup.setAttribute('transform', `translate(${pt.x} ${pt.y}) rotate(${state.yawDeg})`);
+
+  // readouts
+  $('headVal').textContent = `${Math.round(state.yawDeg)}°`;
+  $('distVal').textContent = `${Math.hypot(state.posX, state.posY).toFixed(1)}m`;
+
+  // zone glows — map cells (gain·0.5) and background field (gain·0.24)
+  positionGlows(glows.map, mapSize, mapSize, pt.x, pt.y, mapSize * 0.55, 0.5);
+  const W = window.innerWidth, H = window.innerHeight;
+  const nx = Math.max(-1, Math.min(1, state.posX / CONFIG.circleRadius));
+  const ny = Math.max(-1, Math.min(1, state.posY / CONFIG.circleRadius));
+  positionGlows(glows.bg, W, H, W / 2 + nx * W / 2, H / 2 - ny * H / 2, Math.max(W, H) * 0.5, 0.24);
+}
+
+function positionGlows(store, W, H, px, py, radius, strength) {
+  for (const z of ZONES) {
+    const g = store[z.key];
+    const cellX = z.cell[1] * W / 2, cellY = z.cell[0] * H / 2;
+    const d = radius * 2;
+    g.el.style.width = d + 'px'; g.el.style.height = d + 'px';
+    g.el.style.transform = `translate(${px - cellX - radius}px, ${py - cellY - radius}px)`;
+    g.el.style.background = 'radial-gradient(circle, rgba(255,255,255,1) 0%, rgba(255,255,255,0) 70%)';
+    g.el.style.opacity = (state.gains[z.key] * strength).toFixed(3);
+  }
+}
+
+/* responsive map sizing */
+function layout() {
+  mapSize = mapEl.getBoundingClientRect().width;
+  buildMapSvg();
+}
+window.addEventListener('resize', layout);
+
+layout();
+updateStatusLine();
+requestAnimationFrame(frame);
+loadAll();
+</script>
+</body>
+</html>

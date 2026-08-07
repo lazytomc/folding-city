@@ -1,0 +1,10 @@
+.DS_Store
+
+# 這個 repo 只發佈網頁版（docs/）。
+# iOS 專案與音檔母帶僅保留在本機，不上傳。
+AudioMasters/
+OldAppIcons/
+Info.plist
+Folding City/
+Folding City.xcodeproj/
+.claude/
